@@ -366,8 +366,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cs(uid)
         await q.edit_message_text("❌ عملیات لغو شد.")
 
-    elif d.startswith("use_discount_"):
-        key = d[13:]
+    elif d.startswith("disc_"):
+        key = d[5:]
         parts = key.split("_", 1); ptype = parts[0]; plan_key = parts[1]
         ss(uid, {"w": "discount_code", "plan_key": plan_key, "ptype": ptype})
         await q.edit_message_text("🎫 کد تخفیف خود را وارد کنید:")
@@ -658,14 +658,30 @@ async def recv_discount_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     base = vip_price(plan_key, uid) if plan_key else 0
     discounted = int(base * (100 - dc["percent"]) / 100)
-    ss(uid, {**state, "w": None, "discount_code": code, "discount_pct": dc["percent"], "discounted_price": discounted})
     cs(uid)
-    await update.message.reply_text(
-        f"✅ کد تخفیف `{code}` اعمال شد!\n"
-        f"💸 {dc['percent']}% تخفیف\n"
-        f"💵 قیمت جدید: *{fmt(discounted)}*",
-        parse_mode="Markdown", reply_markup=main_kb(uid)
+    if ptype == "bundle":
+        plan = config.BUNDLE_PLANS.get(plan_key)
+    else:
+        plan = config.PLANS.get(plan_key) or config.TEST_PLANS.get(plan_key)
+    if not plan:
+        await update.message.reply_text("❌ خطا.", reply_markup=main_kb(uid)); return
+    u = db.get_user(uid)
+    bal = u["balance"] if u else 0
+    key = f"{ptype}_{plan_key}"
+    text = (
+        f"🧾 *فاکتور خرید — xservpn*\n\n"
+        f"📦 پلن: {plan['name']}\n"
+        f"💵 قیمت اصلی: {fmt(base)}\n"
+        f"🎫 کد تخفیف: `{code}` ({dc['percent']}% تخفیف)\n"
+        f"💵 مبلغ نهایی: *{fmt(discounted)}*\n"
+        f"💰 موجودی شما: {fmt(bal)}\n\nروش پرداخت را انتخاب کنید:"
     )
+    kb = [
+        [InlineKeyboardButton("💳 پرداخت با کارت", callback_data=f"pay_disc_card_{code}_{key}")],
+        [InlineKeyboardButton(f"💰 پرداخت با موجودی {'✅' if bal>=discounted else '(ناکافی)'}", callback_data=f"pay_disc_wallet_{code}_{key}")],
+        [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+    ]
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 # ── Search user (admin) ───────────────────────────────────
 
@@ -834,9 +850,11 @@ async def show_invoice(q, uid, plan, plan_key, ptype):
                     f"{cinfo['emoji']} پرداخت با {cinfo['symbol']} ({crypto_amount} {cinfo['symbol']})",
                     callback_data=f"pay_crypto_{coin}_{key}"
                 )])
-    kb.append([InlineKeyboardButton("🎫 دارم کد تخفیف", callback_data=f"use_discount_{key}")])
+    kb.append([InlineKeyboardButton("🎫 دارم کد تخفیف", callback_data=f"disc_{key}")])
     kb.append([InlineKeyboardButton("❌ لغو", callback_data="cancel")])
     await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+async def do_card_payment(q, uid, key, context):
     if not flag("card_open"):
         await q.edit_message_text("🔴 پرداخت کارت به کارت غیرفعال است.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ بستن", callback_data="cancel")]]))
@@ -862,8 +880,6 @@ async def show_invoice(q, uid, plan, plan_key, ptype):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel")]])
     )
-    asyncio.create_task(pay_timeout(context.bot, pay_id, uid, q.message.chat_id, config.PAYMENT_TIMEOUT_MINUTES * 60))
-
 async def do_wallet_payment(q, uid, key, context):
     parts = key.split("_", 1); ptype = parts[0]; plan_key = parts[1]
     if ptype == "bundle":
@@ -989,8 +1005,6 @@ async def do_crypto_payment(q, uid, coin, key, context):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="cancel")]])
     )
-    asyncio.create_task(pay_timeout(context.bot, pay_id, uid, q.message.chat_id, config.PAYMENT_TIMEOUT_MINUTES * 60))
-
 # ── Receipt ───────────────────────────────────────────────
 
 async def recv_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
