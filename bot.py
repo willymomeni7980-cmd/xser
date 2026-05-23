@@ -8,7 +8,14 @@ import database as db
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CHANNELS = [config.REFERRAL_CHANNEL]  # کانال‌های اجباری
+CHANNELS = [config.REFERRAL_CHANNEL]  # کانال‌های اجباری (پیش‌فرض)
+
+def get_all_channels():
+    """لیست کانال‌های اجباری: پیش‌فرض + کانال‌های اضافه‌شده از پنل ادمین"""
+    extra = db.get_forced_channels()
+    base = [config.REFERRAL_CHANNEL]
+    all_ch = list(dict.fromkeys(base + extra))  # بدون تکرار
+    return all_ch
 
 PLAN_LABELS = {
     "1gb":            "اشتراک ۱ گیگ",
@@ -37,6 +44,9 @@ def flag(key, default="1"): return db.get_setting(key, default) != "0"
 def card(): return db.get_setting("card_number") or config.CARD_NUMBER
 def cardholder(): return db.get_setting("card_holder") or config.CARD_HOLDER
 
+VIP_WARN_THRESHOLD  = 3_000_000   # هشدار موجودی VIP زیر ۳ میلیون
+VIP_EXIT_THRESHOLD  = 2_500_000   # خروج از VIP زیر ۲.۵ میلیون
+
 def price(key):
     """قیمت پلن، با احتساب override از دیتابیس"""
     base = int(db.get_setting(f"price_{key}") or 0) or \
@@ -44,9 +54,12 @@ def price(key):
     return base
 
 def vip_price(key, user_id):
-    """قیمت با تخفیف VIP کاربر"""
+    """قیمت با تخفیف VIP کاربر (اگه موجودی زیر ۲.۵م باشه VIP اعمال نمی‌شه)"""
     u = db.get_user(user_id)
     total = u.get("total_topup", 0) if u else 0
+    bal = u.get("balance", 0) if u else 0
+    if bal <= VIP_EXIT_THRESHOLD:
+        return price(key)  # بدون تخفیف
     return config.apply_vip_discount(price(key), total)
 
 def crypto_rate(coin):
@@ -77,8 +90,36 @@ def vip_badge(user_id):
     tier = config.get_vip_tier(u.get("total_topup", 0))
     return f"\n{tier['label']} — {tier['discount']}% تخفیف" if tier else ""
 
+async def check_vip_balance_warning(bot, user_id):
+    """بعد از کم شدن موجودی VIP، هشدار یا خروج از VIP رو بررسی می‌کنه"""
+    u = db.get_user(user_id)
+    if not u: return
+    tier = config.get_vip_tier(u.get("total_topup", 0))
+    if not tier: return  # کاربر VIP نیست
+    bal = u.get("balance", 0)
+    if bal <= VIP_EXIT_THRESHOLD:
+        try:
+            await bot.send_message(user_id,
+                f"⚠️ *توجه مهم*\n\n"
+                f"موجودی شما به {fmt(bal)} کاهش یافته است.\n"
+                f"چون موجودی زیر {fmt(VIP_EXIT_THRESHOLD)} رسیده، "
+                f"*تخفیف VIP شما موقتاً غیرفعال می‌شود.*\n\n"
+                f"برای فعال‌سازی مجدد، موجودی خود را افزایش دهید.",
+                parse_mode="Markdown")
+        except Exception: pass
+    elif bal <= VIP_WARN_THRESHOLD:
+        try:
+            await bot.send_message(user_id,
+                f"⚠️ *هشدار موجودی VIP*\n\n"
+                f"موجودی کیف پول شما به {fmt(bal)} رسیده است.\n"
+                f"در صورتی که موجودی به زیر {fmt(VIP_EXIT_THRESHOLD)} برسد، "
+                f"از سطح VIP خارج خواهید شد.\n\n"
+                f"📌 *موجودی شما رو به اتمام است.*",
+                parse_mode="Markdown")
+        except Exception: pass
+
 async def is_member(bot, user_id):
-    for ch in CHANNELS:
+    for ch in get_all_channels():
         try:
             m = await bot.get_chat_member(ch, user_id)
             if m.status not in ("member", "administrator", "creator"):
@@ -99,11 +140,13 @@ def main_kb(uid=None):
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def join_kb():
-    ch = config.REFERRAL_CHANNEL.lstrip("@")
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📢 کانال xservpn", url=f"https://t.me/{ch}")],
-        [InlineKeyboardButton("✅ عضو شدم", callback_data="check_join")],
-    ])
+    channels = get_all_channels()
+    buttons = []
+    for ch in channels:
+        ch_clean = ch.lstrip("@")
+        buttons.append([InlineKeyboardButton(f"📢 کانال {ch_clean}", url=f"https://t.me/{ch_clean}")])
+    buttons.append([InlineKeyboardButton("✅ عضو شدم", callback_data="check_join")])
+    return InlineKeyboardMarkup(buttons)
 
 def admin_kb():
     s_sales  = "🟢 فروش باز"  if flag("sales_open")  else "🔴 فروش بسته"
@@ -124,6 +167,8 @@ def admin_kb():
         [InlineKeyboardButton("🎫 صدور کارت تخفیف", callback_data="a_discount"),
          InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="a_search_user_btn")],
         [InlineKeyboardButton("👑 تنظیمات VIP", callback_data="a_vip_settings")],
+        [InlineKeyboardButton("📢 مدیریت کانال‌های اجباری", callback_data="a_channels")],
+        [InlineKeyboardButton("🎰 قرعه‌کشی", callback_data="a_lottery")],
         [InlineKeyboardButton(f"{s_sales} ← تغییر", callback_data="a_toggle_sales")],
         [InlineKeyboardButton(f"{s_card} ← تغییر", callback_data="a_toggle_card"),
          InlineKeyboardButton(f"{s_topup} ← تغییر", callback_data="a_toggle_topup")],
@@ -200,31 +245,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception: pass
 
-            # بررسی آستانه رفرال (۴ نفر = ۱۰۰ مگ رایگان)
+            # بررسی آستانه رفرال — هر ۴ نفر = ۱۰۰ مگ رایگان (بدون محدودیت)
             updated = db.get_user(ref)
-            if updated and updated["referral_count"] >= config.REFERRAL_THRESHOLD and not updated["referral_rewarded"]:
-                db.mark_referral_rewarded(ref)
-                cfg = db.assign_config(config.REFERRAL_PLAN_KEY, ref)
-                if cfg:
-                    try:
-                        await context.bot.send_message(ref,
-                            f"🎊 تبریک! به {config.REFERRAL_THRESHOLD} دعوت رسیدید!\n\n"
-                            f"🎁 {config.REFERRAL_PLAN_NAME}",
-                            parse_mode="Markdown")
-                        await context.bot.send_message(ref, cfg)
-                    except Exception: pass
-                else:
-                    for aid in all_admins():
+            if updated:
+                total_ref = updated["referral_count"]
+                # بررسی می‌کنیم آیا به مضرب جدیدی از ۴ رسیده‌ایم
+                rewarded_times = updated.get("referral_rewarded", 0)  # تعداد دفعات جایزه گرفته
+                if total_ref > 0 and total_ref // config.REFERRAL_THRESHOLD > rewarded_times:
+                    db.increment_referral_rewarded(ref)
+                    cfg = db.assign_config(config.REFERRAL_PLAN_KEY, ref)
+                    new_total = total_ref // config.REFERRAL_THRESHOLD
+                    if cfg:
                         try:
-                            await context.bot.send_message(aid,
-                                f"🎉 کاربر به {config.REFERRAL_THRESHOLD} دعوت رسید:\n{uinfo(updated)}\n\n"
-                                f"⚠️ کانفیگ رفرال ({config.REFERRAL_PLAN_KEY}) موجود نیست!")
+                            await context.bot.send_message(ref,
+                                f"🎊 تبریک! به مضرب {new_total * config.REFERRAL_THRESHOLD} دعوت رسیدید!\n\n"
+                                f"🎁 {config.REFERRAL_PLAN_NAME}",
+                                parse_mode="Markdown")
+                            await context.bot.send_message(ref, cfg)
                         except Exception: pass
-                    try:
-                        await context.bot.send_message(ref,
-                            f"🎊 تبریک! به {config.REFERRAL_THRESHOLD} دعوت رسیدید!\n"
-                            f"🎁 {config.REFERRAL_PLAN_NAME} شما به زودی ارسال می‌شود.")
-                    except Exception: pass
+                    else:
+                        for aid in all_admins():
+                            try:
+                                await context.bot.send_message(aid,
+                                    f"🎉 کاربر به {new_total * config.REFERRAL_THRESHOLD} دعوت رسید:\n{uinfo(updated)}\n\n"
+                                    f"⚠️ کانفیگ رفرال ({config.REFERRAL_PLAN_KEY}) موجود نیست!")
+                            except Exception: pass
+                        try:
+                            await context.bot.send_message(ref,
+                                f"🎊 تبریک! به مضرب {new_total * config.REFERRAL_THRESHOLD} دعوت رسیدید!\n"
+                                f"🎁 {config.REFERRAL_PLAN_NAME} شما به زودی ارسال می‌شود.")
+                        except Exception: pass
 
     if not await is_member(context.bot, user.id) and not is_admin(user.id):
         await update.message.reply_text(
@@ -272,6 +322,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if w == "a_discount_end":     await a_recv_discount_end(update, context); return
         if w == "a_search_user":      await a_recv_search_user(update, context); return
         if w == "a_vip_tier":         await a_recv_vip_tier(update, context); return
+        if w == "a_add_channel":       await a_recv_add_channel(update, context); return
+        if w == "a_del_channel":       await a_recv_del_channel(update, context); return
         if w == "discount_code":      await recv_discount_code(update, context); return
         cs(uid)
 
@@ -545,6 +597,71 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"✏️ {t['label']}", callback_data=f"a_edit_vip_{i}")] for i, t in enumerate(tiers)]
         kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="a_back")])
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+    # ─── مدیریت کانال‌های اجباری ───
+    elif d == "a_channels":
+        if not is_admin(uid): return
+        channels = get_all_channels()
+        text = "📢 *کانال‌های اجباری*\n\n"
+        for ch in channels:
+            text += f"• `{ch}`\n"
+        if not channels:
+            text += "_هیچ کانالی تنظیم نشده_\n"
+        kb = [
+            [InlineKeyboardButton("➕ افزودن کانال", callback_data="a_add_channel"),
+             InlineKeyboardButton("➖ حذف کانال", callback_data="a_del_channel")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="a_back")],
+        ]
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+    elif d == "a_add_channel":
+        if not is_admin(uid): return
+        ss(uid, {"w": "a_add_channel"})
+        await q.edit_message_text(
+            "📢 *افزودن کانال اجباری*\n\nیوزرنیم کانال را وارد کنید (مثال: @mychannel):",
+            parse_mode="Markdown"
+        )
+    elif d == "a_del_channel":
+        if not is_admin(uid): return
+        channels = db.get_forced_channels()
+        if not channels:
+            await q.edit_message_text("⚠️ کانال اضافه‌ای برای حذف وجود ندارد.\n(کانال پیش‌فرض قابل حذف نیست)",
+                reply_markup=back_kb())
+            return
+        kb = [[InlineKeyboardButton(f"🗑 {ch}", callback_data=f"a_delch_{ch}")] for ch in channels]
+        kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="a_channels")])
+        await q.edit_message_text("کدام کانال را حذف کنیم؟", reply_markup=InlineKeyboardMarkup(kb))
+    elif d.startswith("a_delch_"):
+        if not is_admin(uid): return
+        ch = d[8:]
+        db.remove_forced_channel(ch)
+        await q.edit_message_text(f"✅ کانال `{ch}` از لیست اجباری حذف شد.", parse_mode="Markdown",
+            reply_markup=back_kb())
+
+    # ─── قرعه‌کشی ───
+    elif d == "a_lottery":
+        if not is_admin(uid): return
+        ids = db.get_all_user_ids()
+        if not ids:
+            await q.edit_message_text("⚠️ هیچ کاربری در بات وجود ندارد.", reply_markup=back_kb())
+            return
+        import random as _rnd
+        winner_id = _rnd.choice(ids)
+        winner = db.get_user(winner_id)
+        name = winner.get("full_name", "") if winner else ""
+        uname = winner.get("username", "") if winner else ""
+        uname_str = f"@{uname}" if uname else "ندارد"
+        text = (
+            f"🎰 *نتیجه قرعه‌کشی*\n\n"
+            f"👤 نام: {name}\n"
+            f"🆔 آیدی: `{winner_id}`\n"
+            f"📲 یوزرنیم: {uname_str}\n\n"
+            f"از بین *{len(ids)}* کاربر انتخاب شد."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 قرعه‌کشی مجدد", callback_data="a_lottery")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="a_back")],
+        ])
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
     elif d.startswith("a_edit_vip_"):
         idx = int(d[11:])
         if not is_admin(uid): return
@@ -896,6 +1013,8 @@ async def do_wallet_payment(q, uid, key, context):
 
     db.update_balance(uid, -p)
     pay_id, inv = db.create_payment(uid, p, ptype, plan_key, plan["name"], pay_method="wallet")
+    # بررسی هشدار موجودی VIP بعد از کسر
+    asyncio.create_task(check_vip_balance_warning(context.bot, uid))
 
     if ptype == "bundle":
         count = plan.get("count", 1)
@@ -1536,6 +1655,9 @@ async def a_recv_bal_amt(update, context):
         try:
             await context.bot.send_message(tid, f"💰 موجودی کیف پول شما تغییر کرد.\nموجودی جدید: {fmt(t['balance'])}")
         except Exception: pass
+        # بررسی هشدار VIP اگه موجودی کاهش پیدا کرده
+        if delta < 0:
+            asyncio.create_task(check_vip_balance_warning(context.bot, tid))
     except ValueError:
         await update.message.reply_text("⚠️ عدد وارد کنید.")
 
@@ -1615,6 +1737,28 @@ async def a_recv_broadcast(update, context):
         except Exception: pass
 
     asyncio.create_task(_do_broadcast())
+
+async def a_recv_add_channel(update, context):
+    uid = update.effective_user.id
+    ch = update.message.text.strip()
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    db.add_forced_channel(ch)
+    cs(uid)
+    await update.message.reply_text(
+        f"✅ کانال `{ch}` به لیست اجباری اضافه شد.",
+        parse_mode="Markdown", reply_markup=main_kb(uid))
+
+async def a_recv_del_channel(update, context):
+    uid = update.effective_user.id
+    ch = update.message.text.strip()
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    db.remove_forced_channel(ch)
+    cs(uid)
+    await update.message.reply_text(
+        f"✅ کانال `{ch}` از لیست حذف شد.",
+        parse_mode="Markdown", reply_markup=main_kb(uid))
 
 async def a_recv_add_admin(update, context):
     uid = update.effective_user.id
