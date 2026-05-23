@@ -94,6 +94,12 @@ def init_db():
         expires_at TEXT DEFAULT ''
     )""")
 
+    c.execute("""CREATE TABLE IF NOT EXISTS forced_channels (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel    TEXT UNIQUE NOT NULL,
+        added_at   TEXT DEFAULT (datetime('now'))
+    )""")
+
     # مهاجرت: اضافه کردن ستون‌های جدید در صورت نبودن
     migrations = [
         "ALTER TABLE users ADD COLUMN test_used INTEGER DEFAULT 0",
@@ -210,6 +216,12 @@ def mark_test_used(user_id):
 def mark_referral_rewarded(user_id):
     conn = get_conn(); c = conn.cursor()
     c.execute("UPDATE users SET referral_rewarded=1 WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close()
+
+def increment_referral_rewarded(user_id):
+    """هر بار که کاربر جایزه رفرال می‌گیره این رو یه واحد زیاد می‌کنه"""
+    conn = get_conn(); c = conn.cursor()
+    c.execute("UPDATE users SET referral_rewarded=referral_rewarded+1 WHERE user_id=?", (user_id,))
     conn.commit(); conn.close()
 
 def get_all_users():
@@ -394,6 +406,30 @@ def get_all_discount_codes():
 def deactivate_all_discount_codes():
     conn = get_conn(); c = conn.cursor()
     c.execute("UPDATE discount_codes SET is_active=0")
+    conn.commit(); conn.close()
+
+# ── Forced Channels ───────────────────────────────────────
+
+def get_forced_channels():
+    conn = get_conn(); c = conn.cursor()
+    c.execute("SELECT channel FROM forced_channels ORDER BY id")
+    rows = [r["channel"] for r in c.fetchall()]; conn.close()
+    return rows
+
+def add_forced_channel(channel: str):
+    conn = get_conn(); c = conn.cursor()
+    ch = channel.strip()
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    c.execute("INSERT OR IGNORE INTO forced_channels(channel) VALUES(?)", (ch,))
+    conn.commit(); conn.close()
+
+def remove_forced_channel(channel: str):
+    conn = get_conn(); c = conn.cursor()
+    ch = channel.strip()
+    if not ch.startswith("@"):
+        ch = "@" + ch
+    c.execute("DELETE FROM forced_channels WHERE channel=?", (ch,))
     conn.commit(); conn.close()
 
 def get_configs_summary():
