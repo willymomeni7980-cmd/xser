@@ -53,6 +53,17 @@ def price(key):
         (config.PLANS.get(key) or config.TEST_PLANS.get(key) or config.BUNDLE_PLANS.get(key) or {}).get("price", 0)
     return base
 
+def plan_size(key):
+    """حجم پلن، با احتساب override از دیتابیس"""
+    override = db.get_plan_size(key)
+    if override:
+        return override
+    return (config.PLANS.get(key) or config.TEST_PLANS.get(key) or config.BUNDLE_PLANS.get(key) or {}).get("size", "")
+
+def is_plan_active(key):
+    """چک می‌کنه پلن حذف نشده باشه"""
+    return not db.is_plan_deleted(key)
+
 def vip_price(key, user_id):
     """قیمت با تخفیف VIP کاربر (اگه موجودی زیر ۲.۵م باشه VIP اعمال نمی‌شه)"""
     u = db.get_user(user_id)
@@ -309,6 +320,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if w == "a_bal_uid":          await a_recv_bal_uid(update, context); return
         if w == "a_bal_amt":          await a_recv_bal_amt(update, context); return
         if w == "a_price":            await a_recv_price(update, context); return
+        if w == "a_size":             await a_recv_size(update, context); return
         if w == "a_configs":          await a_recv_configs(update, context); return
         if w == "a_broadcast":        await a_recv_broadcast(update, context); return
         if w == "a_add_admin":        await a_recv_add_admin(update, context); return
@@ -701,6 +713,46 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ss(uid, {"w": "a_price", "key": key})
         cur = price(key)
         await q.edit_message_text(f"قیمت فعلی «{PLAN_LABELS.get(key,key)}»: {fmt(cur)}\n\nقیمت جدید (تومان):")
+    elif d.startswith("a_setsize_"):
+        key = d[10:]
+        if not is_admin(uid): return
+        ss(uid, {"w": "a_size", "key": key})
+        cur = plan_size(key)
+        await q.edit_message_text(
+            f"📊 *ویرایش حجم — {PLAN_LABELS.get(key, key)}*\n\n"
+            f"حجم فعلی: {cur or '—'}\n\n"
+            f"حجم جدید را وارد کنید (مثال: ۳۰ گیگ، 30GB، ۱۵۰۰۰ مگابایت):",
+            parse_mode="Markdown"
+        )
+    elif d.startswith("a_delplan_"):
+        key = d[10:]
+        if not is_admin(uid): return
+        plan_name = PLAN_LABELS.get(key, key)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ بله، حذف {plan_name}", callback_data=f"a_delplan_confirm_{key}"),
+             InlineKeyboardButton("❌ لغو", callback_data="a_prices")],
+        ])
+        await q.edit_message_text(
+            f"⚠️ *آیا مطمئنید؟*\n\nپلن «{plan_name}» از لیست فروش حذف می‌شود.\n"
+            f"(داده‌ها پاک نمی‌شوند و قابل بازگردانی است)",
+            parse_mode="Markdown", reply_markup=kb
+        )
+    elif d.startswith("a_delplan_confirm_"):
+        key = d[18:]
+        if not is_admin(uid): return
+        db.delete_plan(key)
+        await q.edit_message_text(
+            f"✅ پلن «{PLAN_LABELS.get(key, key)}» از فروش حذف شد.",
+            reply_markup=back_kb()
+        )
+    elif d.startswith("a_restore_plan_"):
+        key = d[15:]
+        if not is_admin(uid): return
+        db.restore_plan(key)
+        await q.edit_message_text(
+            f"✅ پلن «{PLAN_LABELS.get(key, key)}» بازگردانده شد.",
+            reply_markup=back_kb()
+        )
     elif d.startswith("a_set_crypto_rate_"):
         coin = d[18:]
         if not is_admin(uid): return
@@ -900,6 +952,8 @@ async def show_plans(update, context, plans, ptype):
     uid = update.effective_user.id
     kb = []
     for key, plan in plans.items():
+        if db.is_plan_deleted(key):
+            continue  # پلن حذف‌شده نمایش داده نمیشه
         p = vip_price(key, uid)
         kb.append([InlineKeyboardButton(f"📦 {plan['name']} — {fmt(p)}", callback_data=f"plan_{key}")])
     kb.append([InlineKeyboardButton("❌ لغو", callback_data="cancel")])
@@ -916,6 +970,8 @@ async def show_bundles(update, context):
     uid = update.effective_user.id
     kb = []
     for key, plan in config.BUNDLE_PLANS.items():
+        if db.is_plan_deleted(key):
+            continue  # پلن حذف‌شده نمایش داده نمیشه
         p = vip_price(key, uid)
         normal = price(key)
         saving = normal - p
@@ -958,10 +1014,11 @@ async def show_invoice(q, uid, plan, plan_key, ptype):
     u = db.get_user(uid)
     bal = u["balance"] if u else 0
     p = plan["price"]
+    size_display = plan_size(plan_key) or plan.get("size", "")
     text = (
         f"🧾 *فاکتور خرید — xservpn*\n\n"
         f"📦 پلن: {plan['name']}\n"
-        f"📊 حجم: {plan['size']}\n"
+        f"📊 حجم: {size_display}\n"
     )
     if plan.get("duration"):
         text += f"⏱ مدت: {plan['duration']}\n"
@@ -1722,10 +1779,23 @@ async def a_show_configs(q, uid):
 
 async def a_show_prices(q, uid):
     all_plans = {**config.PLANS, **config.TEST_PLANS, **config.BUNDLE_PLANS}
-    text = "💲 *قیمت‌های فعلی — xservpn*\n\n"
+    text = "💲 *مدیریت پلن‌ها — xservpn*\n\n"
     for k, plan in all_plans.items():
-        text += f"• {plan['name']}: {fmt(price(k))}\n"
-    kb = [[InlineKeyboardButton(f"✏️ {plan['name']}", callback_data=f"a_setprice_{k}")] for k, plan in all_plans.items()]
+        deleted = db.is_plan_deleted(k)
+        size_val = plan_size(k) or plan.get("size", "—")
+        status = "🚫" if deleted else "✅"
+        text += f"{status} {plan['name']}\\n   💵 {fmt(price(k))} | 📊 {size_val}\\n"
+    kb = []
+    for k, plan in all_plans.items():
+        deleted = db.is_plan_deleted(k)
+        if deleted:
+            kb.append([InlineKeyboardButton(f"♻️ بازگردانی {plan['name']}", callback_data=f"a_restore_plan_{k}")])
+        else:
+            kb.append([
+                InlineKeyboardButton(f"💵 قیمت {plan['name']}", callback_data=f"a_setprice_{k}"),
+                InlineKeyboardButton(f"📊 حجم", callback_data=f"a_setsize_{k}"),
+                InlineKeyboardButton(f"🗑", callback_data=f"a_delplan_{k}"),
+            ])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="a_back")])
     await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1802,6 +1872,20 @@ async def a_recv_price(update, context):
         await update.message.reply_text(f"✅ قیمت {PLAN_LABELS.get(key,key)} → {fmt(p)}", reply_markup=main_kb(uid))
     except ValueError:
         await update.message.reply_text("⚠️ عدد وارد کنید.")
+
+async def a_recv_size(update, context):
+    uid = update.effective_user.id
+    state = gs(uid)
+    key = state.get("key")
+    size_text = update.message.text.strip()
+    if not size_text:
+        await update.message.reply_text("⚠️ حجم نمی‌تواند خالی باشد."); return
+    db.set_plan_size(key, size_text)
+    cs(uid)
+    await update.message.reply_text(
+        f"✅ حجم پلن «{PLAN_LABELS.get(key, key)}» به *{size_text}* تغییر کرد.",
+        parse_mode="Markdown", reply_markup=main_kb(uid)
+    )
 
 async def a_recv_crypto_rate(update, context):
     uid = update.effective_user.id
