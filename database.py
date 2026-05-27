@@ -440,3 +440,34 @@ def get_configs_summary():
                  FROM configs GROUP BY plan_key""")
     rows = [dict(r) for r in c.fetchall()]; conn.close()
     return rows
+
+# ── Plan Size Override ────────────────────────────────────
+
+def get_plan_size(plan_key: str) -> str | None:
+    """حجم override شده پلن از دیتابیس (اگه نبود None برمی‌گردونه)"""
+    val = get_setting(f"size_{plan_key}")
+    return val if val else None
+
+def set_plan_size(plan_key: str, size: str):
+    """ذخیره حجم override برای پلن"""
+    set_setting(f"size_{plan_key}", size.strip())
+
+def delete_plan(plan_key: str):
+    """پاک کردن یک پلن (فقط override قیمت و حجمش از DB حذف میشه)"""
+    conn = get_conn(); c = conn.cursor()
+    c.execute("DELETE FROM settings WHERE key=? OR key=?",
+              (f"price_{plan_key}", f"size_{plan_key}"))
+    # علامت‌گذاری پلن به عنوان حذف‌شده
+    c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+              (f"plan_deleted_{plan_key}", "1"))
+    conn.commit(); conn.close()
+
+def restore_plan(plan_key: str):
+    """بازگرداندن پلن حذف‌شده"""
+    conn = get_conn(); c = conn.cursor()
+    c.execute("DELETE FROM settings WHERE key=?", (f"plan_deleted_{plan_key}",))
+    conn.commit(); conn.close()
+
+def is_plan_deleted(plan_key: str) -> bool:
+    """چک کردن اینکه پلن حذف شده یا نه"""
+    return get_setting(f"plan_deleted_{plan_key}") == "1"
