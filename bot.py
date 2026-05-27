@@ -1784,7 +1784,7 @@ async def a_show_prices(q, uid):
         deleted = db.is_plan_deleted(k)
         size_val = plan_size(k) or plan.get("size", "—")
         status = "🚫" if deleted else "✅"
-        text += f"{status} {plan['name']}\\n   💵 {fmt(price(k))} | 📊 {size_val}\\n"
+        text += f"{status} {plan['name']}\n   💵 {fmt(price(k))} | 📊 {size_val}\n"
     kb = []
     for k, plan in all_plans.items():
         deleted = db.is_plan_deleted(k)
